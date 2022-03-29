@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+message Requests {
+  bytes data = 1;
+}
+
+message Responses {
+  bytes data = 1;
+}
+
+service API {
+  rpc HandleRequests (Requests) returns (Responses) {}
+}
