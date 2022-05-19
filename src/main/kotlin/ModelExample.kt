@@ -1,16 +1,15 @@
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.convertValue
 import dto.*
-import project2.Ant
-import project2.Board
-import project2.Doodlebug
-import project2.Simulator
+import trash.*
 
 class ModelExample : ModelApi {
     private var state: State = State.STOP
-    private var t: Float = 0f
-
-    private var testBoard: Board? = null
 
     private val responses = mutableListOf<Response>()
+    private lateinit var repository: ModelRepository
+    private lateinit var objectRepository: ObjectRepository
+    private val objectMapper = ObjectMapper()
 
 
     private fun getState(): State {
@@ -18,40 +17,75 @@ class ModelExample : ModelApi {
     }
 
     private fun run(inputArgs: List<Any>) {
-        val ants = inputArgs[1] as Int
-        val bugs = inputArgs[0] as Int
-
-        t = 0f
+        repository = Drawing.start()
+        objectRepository = repository.objectRepository
         state = State.RUN
-
-        testBoard = Board(ants, bugs)
-        testBoard?.printBoard()
     }
 
     private fun pause() {
+        Drawing.pause()
         state = State.PAUSE
     }
 
     private fun stop() {
+        Drawing.stop()
         state = State.STOP
-        testBoard = null
     }
 
     private fun resume() {
+        Drawing.resume()
         state = State.RUN
     }
 
     private fun getSnapshot(): Snapshot {
-        if (state == State.RUN) {
-            t += 1f
-            Simulator.turnSequence(testBoard!!)
-            testBoard!!.printBoard()
-        }
-        return createSnapshot(t.toDouble(), testBoard)
+        return Snapshot(
+            repository.modelTime,
+            mapOf(
+                "ModelSettings" to listOf(getModelSettingsSnapshot()),
+                "Car" to listOf(getCarSnapshot()),
+                "Parking" to listOf(getParkingSnapshot()),
+                "Dump" to listOf(getDumpSnapshot()),
+                "Turn" to getTurnSnapshots(),
+                "GarbageCan" to getGarbageCanSnapshots()
+            )
+        )
+    }
+
+    private fun getModelSettingsSnapshot(): AgentSnapshot {
+        return AgentSnapshot(-1, mapOf("hourSec" to Drawing.hourSec))
+    }
+
+    private fun getCarSnapshot(): AgentSnapshot {
+        return convertToSnapshot(objectRepository.getCar())
+    }
+
+    private fun getParkingSnapshot(): AgentSnapshot {
+        return convertToSnapshot(objectRepository.getParking())
+    }
+
+    private fun getDumpSnapshot(): AgentSnapshot {
+        return convertToSnapshot(objectRepository.getDump())
+    }
+
+    private fun getTurnSnapshots(): List<AgentSnapshot> {
+        return convertToSnapshots(objectRepository.getTurns())
+    }
+
+    private fun getGarbageCanSnapshots(): List<AgentSnapshot> {
+        return convertToSnapshots(objectRepository.getGarbageCans())
+    }
+
+    private fun convertToSnapshots(list: List<Object>): List<AgentSnapshot> {
+        return list.map { convertToSnapshot(it) }
+    }
+
+    private fun convertToSnapshot(obj: Object): AgentSnapshot {
+        val carProps = objectMapper.convertValue<Map<String, Any>>(obj)
+        return AgentSnapshot(obj.id, carProps)
     }
 
 
-    override fun handleRequests(requests: Requests): Responses {
+    override fun handleRequests(requests: Requests): Responses = synchronized(Drawing){
         requests.requests.forEach {
             when (it.agentId) {
                 0 -> processControlRequest(it.ack, it.name, it.args)
@@ -72,7 +106,8 @@ class ModelExample : ModelApi {
                 "Resume" -> resume()
                 "GetState" -> getState()
                 "GetSnapshot" -> getSnapshot()
-                else -> {}
+                else -> {
+                }
             }
         }.onFailure {
             responses.add(Response(ack, false, Error(0, it.message.orEmpty())))
@@ -83,73 +118,42 @@ class ModelExample : ModelApi {
     }
 
     private fun processAgentRequest(agentId: Int, ack: Int, name: String, args: List<Any>) {
-        when (agentId) {
-            1 -> processBoardRequest(ack, name, args)
-            else -> {
-            }
-        }
-    }
-
-    private fun processBoardRequest(ack: Int, name: String, args: List<Any>) {
-        when (name) {
-            "SetA" -> {
-                Board.a = args[0] as Int
+        if (agentId == -1) {
+            if (name == "SetHourSec") {
+                Drawing.hourSec = args[0] as Double
                 responses.add(Response(ack, true, Unit))
             }
-        }
-    }
-
-    private fun createSnapshot(t: Double, board: Board?): Snapshot {
-        board ?: return Snapshot(t, mapOf())
-        val ants = mutableListOf<AgentSnapshot>()
-        val bugs = mutableListOf<AgentSnapshot>()
-        board.state.field.flatten().forEach {
-            when (it) {
-                is Ant -> ants.add(it.getSnapshot())
-                is Doodlebug -> bugs.add(it.getSnapshot())
+            if (name == "Restart") {
+                Drawing.restart()
+                responses.add(Response(ack, true, Unit))
             }
+            return
         }
-        return Snapshot(
-            t,
-            mapOf("Ant" to ants, "Doodlebug" to bugs, "Board" to listOf(board.getSnapshot())),
-        )
+        when (val obj = objectRepository.objects[agentId]!!) {
+            is GarbageCan -> obj.processGarbageCanRequest(ack, name, args)
+            is Car -> obj.processCarRequest(ack, name, args)
+            else -> { }
+        }
+    }
+
+    private fun Car.processCarRequest(ack: Int, name: String, args: List<Any>) {
+        when (name) {
+            "SetSpeed" -> speed = args[0] as Int
+            "SetRestTime" -> restTime = args[0] as Double
+            "SetCapacity" -> capacity = args[0] as Double
+            "SetWorkOnSchedule" -> workOnSchedule = args[0] as Boolean
+            "SetFuelConsumption" -> fuelConsumption = args[0] as Int
+            "SetTraversalOrder" -> traversalOrder = (args[0] as List<*>).map { objectRepository.objects[it] as Node }
+        }
+        responses.add(Response(ack, true, Unit))
+    }
+
+    private fun GarbageCan.processGarbageCanRequest(ack: Int, name: String, args: List<Any>) {
+        when (name) {
+            "SetCapacity" -> capacity = args[0] as Double
+            "SetIntensity" -> intensity = args[0] as Double
+            "SetCollectIntensity" -> collectIntensity = args[0] as Double
+        }
+        responses.add(Response(ack, true, Unit))
     }
 }
-
-fun Ant.getSnapshot(): AgentSnapshot {
-    return AgentSnapshot(
-        id,
-        mapOf(
-            "colPosition" to getColPosition(),
-            "rowPosition" to getRowPosition(),
-            "breedThreshold" to breedThreshold,
-            "timeSinceBreed" to timeSinceBreed
-        )
-    )
-}
-
-fun Doodlebug.getSnapshot(): AgentSnapshot {
-    return AgentSnapshot(
-        id,
-        mapOf(
-            "colPosition" to getColPosition(),
-            "rowPosition" to getRowPosition(),
-            "breedThreshold" to breedThreshold,
-            "timeSinceBreed" to timeSinceBreed,
-            "timeSinceEat" to timeSinceEat
-        )
-    )
-}
-
-data class Size(val height: Int, val width: Int)
-
-fun Board.getSnapshot(): AgentSnapshot {
-    return AgentSnapshot(
-        1,
-        mapOf(
-            "size" to Size(state.field.size, state.field[0].size),
-            "a" to Board.a
-        )
-    )
-}
-
